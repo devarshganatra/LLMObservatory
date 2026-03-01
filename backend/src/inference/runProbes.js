@@ -10,7 +10,7 @@ dotenv.config();
    (OpenAI-compatible SDK)
 ------------------------------ */
 const ai = new OpenAI({
-  apiKey: process.env.XAI_API_KEY, 
+  apiKey: process.env.XAI_API_KEY,
   baseURL: "https://api.groq.com/openai/v1", // Groq endpoint
 });
 
@@ -38,15 +38,19 @@ const INFERENCE_CONFIG = {
 // Helper function to pause execution
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/* -----------------------------
-   4. Run Probes
------------------------------- */
-export async function runProbes() {
+/**
+ * 4. Run Probes
+ * @param {Object} options - Optional overrides (temperatureOverride, runType)
+ */
+export async function runProbes(options = {}) {
+  const { temperatureOverride, runType = "manual" } = options;
+
   const runId = `run_${Date.now()}`;
   const startedAt = new Date().toISOString();
   const modelName = "qwen/qwen3-32b";
+  const temperature = temperatureOverride !== undefined ? temperatureOverride : INFERENCE_CONFIG.temperature;
 
-  console.log(`Starting run: ${runId}`);
+  console.log(`Starting run: ${runId} (Type: ${runType}, Temp: ${temperature})`);
   console.log(`Using model: ${modelName}`);
 
   const probeResults = [];
@@ -65,7 +69,7 @@ export async function runProbes() {
         error: "INVALID_PROMPT: Prompt was empty or undefined",
         timestamp: new Date().toISOString(),
       });
-      continue; 
+      continue;
     }
 
     try {
@@ -74,7 +78,7 @@ export async function runProbes() {
         messages: [
           { role: "user", content: probe.prompt }
         ],
-        temperature: INFERENCE_CONFIG.temperature,
+        temperature: temperature,
         max_tokens: INFERENCE_CONFIG.max_tokens,
         top_p: INFERENCE_CONFIG.top_p,
         stream: false,
@@ -106,7 +110,7 @@ export async function runProbes() {
         error: err.message,
         timestamp: new Date().toISOString(),
       });
-      
+
       if (err.message.includes("429")) {
         console.log(`Rate limit hit. Backing off for 10 seconds...`);
         await sleep(10000);
@@ -118,12 +122,12 @@ export async function runProbes() {
 
   return {
     run_id: runId,
-    run_type: "manual",
+    run_type: runType,
     probeset_version: probeset.version,
     model_config: {
       provider: "groq",
       model: modelName,
-      temperature: INFERENCE_CONFIG.temperature,
+      temperature: temperature,
       max_output_tokens: INFERENCE_CONFIG.max_tokens,
       top_p: INFERENCE_CONFIG.top_p,
     },

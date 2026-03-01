@@ -1,0 +1,10 @@
+{
+    "GLOBAL_MEAN_THRESHOLD": 0.5,
+    "PROBE_DRIFT_THRESHOLD": 0.8,
+    "LOW_VOL_QUORUM_COUNT": 2,
+    "EXTREME_ANOMALY_THRESHOLD": 1.5,
+    "INFO_THRESHOLD": 0.4,
+    "WARNING_THRESHOLD": 0.6,
+    "CLEAN_RUNS_TO_RECOVER": 2,
+    "_comment": "These are placeholder thresholds. Calibrate after baseline expansion to N≈35."
+}

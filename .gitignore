@@ -19,3 +19,9 @@ build/
 
 data/runs/
 *.log
+
+data/baselines/*
+data/drift_metrics/*
+data/features/*
+data/insights/*
+data/embeddings/*

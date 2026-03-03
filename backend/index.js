@@ -1,7 +1,7 @@
 import express from "express";
 import dotenv from "dotenv";
 import { runProbes } from "./src/inference/runProbes.js";
-import { saveRun } from "./src/inference/saveRun.js";
+import { persistRun } from "./src/services/runService.js";
 import { initializeConceptEmbeddings } from "./src/features/utils/conceptCoverage.js";
 import { initEmbeddingModel } from "./src/embeddings/embeddingService.js";
 import { ensureCollectionExists } from "./src/embeddings/qdrantService.js";
@@ -32,7 +32,11 @@ async function bootstrap() {
   app.post("/run", async (req, res) => {
     try {
       const runData = await runProbes();
-      saveRun(runData);
+      try {
+        await persistRun(runData);
+      } catch (dbErr) {
+        console.error(`[DB] Persistence failed (JSON still saved): ${dbErr.message}`);
+      }
       res.json({ status: "success", run_id: runData.run_id });
     } catch (err) {
       res.status(500).json({ error: err.message });

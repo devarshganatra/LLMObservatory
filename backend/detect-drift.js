@@ -1,12 +1,63 @@
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
+import 'dotenv/config';
 import { processDrift } from './src/drift/driftEngine.js';
+import { getLatestBaseline } from './src/repositories/baselineRepository.js';
+import { createModelIfNotExists } from './src/repositories/modelRepository.js';
+import { persistDriftResult } from './src/services/driftService.js';
 
 const RUNS_DIR = path.resolve('../data/runs');
 const FEATURES_DIR = path.resolve('../data/features');
 const BASELINE_PATH = path.resolve('../data/baselines/baseline_final.json');
 const DRIFT_METRICS_DIR = path.resolve('../data/drift_metrics');
 const PERSISTENCE_PATH = path.resolve('../data/drift_metrics/persistence_state.json');
+
+function computeConfigHash(modelConfig, probesetVersion) {
+    const payload = {
+        provider: modelConfig.provider,
+        model: modelConfig.model,
+        temperature: modelConfig.temperature,
+        max_output_tokens: modelConfig.max_output_tokens,
+        top_p: modelConfig.top_p,
+        probeset_version: probesetVersion
+    };
+    return crypto.createHash('md5').update(JSON.stringify(payload)).digest('hex');
+}
+
+/**
+ * Dual-read: DB first, JSON fallback.
+ */
+async function loadBaseline() {
+    try {
+        const modelConfig = { provider: 'groq', model: 'qwen/qwen3-32b', temperature: 0.2, max_output_tokens: 4096, top_p: 0.95 };
+        const probeVersion = '1.0';
+        const configHash = computeConfigHash(modelConfig, probeVersion);
+
+        const modelId = await createModelIfNotExists({
+            name: modelConfig.model,
+            provider: modelConfig.provider,
+            version: null,
+            configHash
+        });
+
+        const dbBaseline = await getLatestBaseline(modelId, configHash, probeVersion);
+        if (dbBaseline) {
+            console.log(`[DRIFT] Loaded baseline from DB (id=${dbBaseline.baseline_id})`);
+            return dbBaseline;
+        }
+    } catch (err) {
+        console.warn(`[DRIFT] DB baseline load failed, falling back to JSON: ${err.message}`);
+    }
+
+    // Fallback to JSON
+    if (!fs.existsSync(BASELINE_PATH)) {
+        console.error('[ERROR] No baseline found in DB or JSON.');
+        process.exit(1);
+    }
+    console.log('[DRIFT] Loaded baseline from JSON file (fallback).');
+    return JSON.parse(fs.readFileSync(BASELINE_PATH, 'utf8'));
+}
 
 async function main() {
     const runId = process.argv[2];
@@ -15,12 +66,8 @@ async function main() {
         process.exit(1);
     }
 
-    // 1. Load Baseline
-    if (!fs.existsSync(BASELINE_PATH)) {
-        console.error('[ERROR] Final baseline not found. Run recompute-final-baseline.js first.');
-        process.exit(1);
-    }
-    const baseline = JSON.parse(fs.readFileSync(BASELINE_PATH, 'utf8'));
+    // 1. Load Baseline (DB-first, JSON fallback)
+    const baseline = await loadBaseline();
 
     // 2. Load Run & Features
     const runPath = path.join(RUNS_DIR, `run_${runId}.json`);
@@ -47,16 +94,20 @@ async function main() {
     // 4. Process Drift
     const result = await processDrift(runData, featuresData, baseline, prevState);
 
-    // 5. Save Results
+    // 5. Save Results (dual-write: JSON + DB)
     if (!fs.existsSync(DRIFT_METRICS_DIR)) fs.mkdirSync(DRIFT_METRICS_DIR, { recursive: true });
 
-    // Update persistence state
+    // Persistence state remains JSON-only (not DB-backed in this phase)
     const newState = { state: result.run_decision.drift_state, clean_count: result.run_decision.clean_count };
     fs.writeFileSync(PERSISTENCE_PATH, JSON.stringify(newState, null, 2));
 
-    // Save detailed metrics
+    // Drift result: JSON + DB via service
     const resultPath = path.join(DRIFT_METRICS_DIR, `drift_${runId}.json`);
-    fs.writeFileSync(resultPath, JSON.stringify(result, null, 2));
+    const { driftRunId } = await persistDriftResult(result, resultPath);
+
+    if (driftRunId) {
+        console.log(`[DB] Drift run ID: ${driftRunId}`);
+    }
 
     // 6. Print Summary
     console.log('\n--- Drift Report ---');
@@ -66,7 +117,6 @@ async function main() {
     console.log(`Weighted Mean Score: ${result.run_decision.weighted_mean.toFixed(4)}`);
     console.log(`Final State: ${newState.state}`);
     console.log("Feature baseline sample_size:", baseline.sample_size);
-    console.log("Feature baseline probes:", Object.keys(baseline).length);
 
     if (result.run_decision.drift_detected) {
         console.log('\nDrifted Probes:');

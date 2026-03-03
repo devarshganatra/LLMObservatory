@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { runProbes } from '../inference/runProbes.js';
-import { saveRun } from '../inference/saveRun.js';
+import { persistRun } from '../services/runService.js';
 import { extractFeatures } from '../features/featureEngine.js';
 import { probeMetadataMap } from '../features/probeMetadata.js';
 import { processRunFile } from '../embeddings/embeddingPipeline.js';
@@ -59,8 +59,12 @@ export async function generateBaseline({ runs = 30 } = {}) {
                 probesetVersion = runData.probeset_version;
             }
 
-            // 2. Save Run
-            saveRun(runData);
+            // 2. Save Run (JSON + DB)
+            try {
+                await persistRun(runData);
+            } catch (dbErr) {
+                console.error(`[DB] Persistence failed (JSON still saved): ${dbErr.message}`);
+            }
             runIds.push(runData.run_id);
 
             // 3. Estimate token usage
@@ -68,7 +72,7 @@ export async function generateBaseline({ runs = 30 } = {}) {
             totalEstimatedTokens += runTokens;
             console.log(`[BASELINE] Run estimated tokens: ${Math.round(runTokens)}. Total: ${Math.round(totalEstimatedTokens)}`);
 
-            if (totalEstimatedTokens > 1200000) {
+            if (totalEstimatedTokens > 450000) {
                 console.warn(`[WARNING] Token usage approaching 450K. Stopping early.`);
                 break;
             }
@@ -97,7 +101,11 @@ export async function generateBaseline({ runs = 30 } = {}) {
             try {
                 console.log(`[BASELINE] Retrying Run ${i}...`);
                 const runData = await runProbes({ temperatureOverride: 0.2, runType: "baseline" });
-                saveRun(runData);
+                try {
+                    await persistRun(runData);
+                } catch (dbErr) {
+                    console.error(`[DB] Retry persistence failed: ${dbErr.message}`);
+                }
                 runIds.push(runData.run_id);
                 const runFilePath = path.join(RUNS_DIR, `${runData.run_id}.json`);
                 await processRunFile(runFilePath);

@@ -1,9 +1,3 @@
-/**
- * Stage 6: Drift Detection Orchestrator
- * 
- * Coordinates the full drift pipeline from raw run to final classification.
- */
-
 import { computeSegmentScore, cosineDistance } from './segmentScorer.js';
 import { aggregateSegments } from './segmentAggregator.js';
 import { computeFeatureScore } from './featureScorer.js';
@@ -13,35 +7,62 @@ import { computeRunDecision } from './runAggregator.js';
 import { updateDriftState } from './persistenceEngine.js';
 import { classifyDrift } from './driftClassifier.js';
 import { getEmbeddingsByRunIds } from '../embeddings/qdrantService.js';
+import { getRunDetailsById } from '../repositories/runRepository.js';
+import { getProbeResultsByRunId } from '../repositories/probeRepository.js';
+import { getLatestBaseline } from '../repositories/baselineRepository.js';
+import { getLatestDriftRunByRunId } from '../repositories/driftRepository.js';
+import { probeMetadataMap } from '../features/probeMetadata.js';
+import { logger } from '../logger/logger.js';
 
 /**
- * Executes the full drift detection pipeline for a run.
- * @param {Object} runData - Raw run data from Stage 2
- * @param {Object} featuresData - Features data from Stage 3
- * @param {Object} baseline - Final baseline object
- * @param {Object} prevState - Current drift state (state, clean_count)
- * @returns {Object} Full drift result object
+ * DB-Native Drift Detection.
+ * Loads all context from Postgres and Qdrant.
+ * @param {string} dbRunId - Run UUID
  */
-export async function processDrift(runData, featuresData, baseline, prevState) {
-    const { run_id, timestamp } = runData;
-    const { embedding_baselines: embBaselines, feature_baselines: featBaselines } = baseline;
+export async function processDriftFromDB(dbRunId) {
+    const start = process.hrtime.bigint();
 
-    // 1. Fetch live embeddings from Qdrant
-    const points = await getEmbeddingsByRunIds([run_id]);
-    const liveEmbs = {}; // probe_id -> { full: vector, ... }
+    // 1. Load Run Details
+    const run = await getRunDetailsById(dbRunId);
+    if (!run) throw new Error(`Run not found: ${dbRunId}`);
+
+    // 2. Load Probe Results
+    const probeResultsRaw = await getProbeResultsByRunId(dbRunId);
+
+    // 3. Load Baseline
+    logger.debug({
+        model_id: run.model_id,
+        config_hash: run.config_hash,
+        probe_version: run.probe_version
+    }, '[DRIFT-DB] Looking for baseline');
+
+    const baseline = await getLatestBaseline(run.model_id, run.config_hash, run.probe_version);
+    if (!baseline) throw new Error(`Baseline not found for run ${dbRunId}`);
+
+    // 4. Load Previous State
+    const lastDrift = await getLatestDriftRunByRunId(dbRunId);
+    const prevState = {
+        state: lastDrift?.drift_state || 'STABLE',
+        clean_count: lastDrift?.clean_count || 0
+    };
+
+    // 5. Fetch live embeddings from Qdrant
+    const originalRunId = run.original_run_id;
+    const points = await getEmbeddingsByRunIds([originalRunId]);
+    const liveEmbs = {};
     for (const p of points) {
         if (!liveEmbs[p.payload.probe_id]) liveEmbs[p.payload.probe_id] = {};
         liveEmbs[p.payload.probe_id][p.payload.embedding_type] = p.vector;
     }
 
+    const { embedding_baselines: embBaselines, feature_baselines: featBaselines } = baseline;
     const probeResults = [];
 
-    // 2. Process each probe
-    for (const probeRes of runData.probe_results) {
-        const probeId = probeRes.probe_id;
-        const probeMeta = runData.probeset_version === baseline.probeset_version
-            ? runData.probe_metadata?.[probeId]
-            : null; // In production, we'd lookup from a stable registry
+    // 6. Process each probe
+    for (const probeRaw of probeResultsRaw) {
+        const probeId = probeRaw.probe_id;
+        const probeMeta = probeMetadataMap[probeId];
+        const probeStart = process.hrtime.bigint();
 
         // Metadata fallback
         const volatility = probeMeta?.volatility || "medium";
@@ -62,7 +83,7 @@ export async function processDrift(runData, featuresData, baseline, prevState) {
         const { embedding_score, system_error } = aggregateSegments(segmentScores);
 
         // C. Feature Scoring
-        const liveFeatures = featuresData.probe_results.find(p => p.probe_id === probeId)?.features || {};
+        const liveFeatures = probeRaw.feature_vector || {};
         const featBaseline = featBaselines[probeId] || {};
         const { feature_score, cluster_scores, feature_details } = computeFeatureScore(liveFeatures, featBaseline);
 
@@ -71,6 +92,8 @@ export async function processDrift(runData, featuresData, baseline, prevState) {
 
         // E. Volatility Dampening
         const { final_probe_score, volatility_multiplier } = applyVolatilityWeight(raw_probe_score, volatility, weight);
+
+        const probeDurationMs = Number((process.hrtime.bigint() - probeStart) / 1000000n);
 
         probeResults.push({
             probe_id: probeId,
@@ -84,23 +107,33 @@ export async function processDrift(runData, featuresData, baseline, prevState) {
             volatility,
             volatility_multiplier,
             probe_weight: weight,
-            system_error: system_error || fusionSystemError
+            system_error: system_error || fusionSystemError,
+            probe_duration_ms: probeDurationMs
         });
     }
 
     // F. Run-Level Aggregation
     const runDecision = computeRunDecision(probeResults);
 
-    // G. Persistence
+    // G. Persistence (Temporal decision)
     const newState = updateDriftState(prevState.state, prevState.clean_count, runDecision);
 
     // H. Classification
     const classification = classifyDrift(newState.state, runDecision, probeResults);
 
+    const driftDurationMs = Number((process.hrtime.bigint() - start) / 1000000n);
+
+    logger.info({
+        dbRunId,
+        drift_duration_ms: driftDurationMs,
+        drift_state: newState.state,
+        classification
+    }, 'Drift detection complete');
+
     // Assembly
     return {
-        run_id,
-        timestamp,
+        run_id: originalRunId,
+        timestamp: run.started_at,
         probe_results: probeResults,
         run_decision: {
             ...runDecision,
@@ -109,6 +142,8 @@ export async function processDrift(runData, featuresData, baseline, prevState) {
             classification
         },
         baseline_id: baseline.baseline_id,
-        model_config_hash: baseline.model_config_hash // future-proofing
+        model_config_hash: baseline.config_hash,
+        drift_duration_ms: driftDurationMs
     };
 }
+

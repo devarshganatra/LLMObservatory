@@ -25,3 +25,7 @@ data/drift_metrics/*
 data/features/*
 data/insights/*
 data/embeddings/*
+
+.env.*
+.env.development
+.env.production

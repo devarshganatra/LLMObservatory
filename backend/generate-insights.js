@@ -1,10 +1,8 @@
-/**
- * CLI Entry: Generate Insights for a Drifted Run
- */
-
 import fs from 'fs';
 import path from 'path';
+import 'dotenv/config';
 import { processInsights } from './src/insights/insightEngine.js';
+import { persistInsightResult } from './src/services/insightService.js';
 
 const DRIFT_METRICS_DIR = path.resolve('../data/drift_metrics');
 const INSIGHTS_DIR = path.resolve('../data/insights');
@@ -34,8 +32,9 @@ async function main() {
         // Ensure output dir exists
         if (!fs.existsSync(INSIGHTS_DIR)) fs.mkdirSync(INSIGHTS_DIR, { recursive: true });
 
+        // Dual-write: JSON + DB via service
         const outputPath = path.join(INSIGHTS_DIR, `insights_${idOnly}.json`);
-        fs.writeFileSync(outputPath, JSON.stringify(insightReport, null, 2));
+        const { insightRunId } = await persistInsightResult(insightReport, outputPath);
 
         console.log(`\n--- Insight Summary ---`);
         console.log(`Run ID: ${insightReport.run_id}`);

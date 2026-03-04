@@ -1,18 +1,58 @@
-# LLMObservatory 
+# LLM Observatory
 
-LLMObservatory is an ML observability system designed to detect behavioral drift in Large Language Models (LLMs) over time.
+Enterprise-grade platform for LLM monitoring, drift detection, and insight generation.
 
-## Motivation
-LLMs deployed in production can change silently due to safety tuning, model updates, or backend routing. This project aims to detect such changes by repeatedly probing models with fixed prompts and statistically analyzing shifts in their behavior.
+## Project Structure
 
-## Core Idea
-- Use fixed, versioned probe prompts
-- Collect LLM responses over time
-- Convert responses into embeddings and interpretable behavioral features
-- Learn a baseline behavior distribution
-- Detect and explain behavioral drift without labels
+- **backend/**: Node.js Express server and BullMQ worker implementation.
+- **data/**: Local storage for pipeline artifacts (features, drift metrics, insights) used for downstream processing.
 
-## Current Status
-- Project skeleton initialized
-- Backend setup complete (Node.js)
-- Architecture and feature set finalized
+## Quick Start (Backend)
+
+The backend is split into an API process and a background worker process.
+
+### Prerequisites
+
+- PostgreSQL (with pgvector)
+- Redis (compatible with BullMQ, e.g., Upstash)
+
+### Setup
+
+1. Navigate to the backend directory:
+   ```bash
+   cd backend
+   ```
+
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+
+3. Configure environment variables in `.env`:
+   ```env
+   DATABASE_URL=postgres://...
+   REDIS_URL=redis://...
+   JWT_ACCESS_SECRET=...
+   JWT_REFRESH_SECRET=...
+   ```
+
+### Execution
+
+Start the API server:
+```bash
+npm run start:api
+```
+
+Start the background worker:
+```bash
+npm run start:worker
+```
+
+## Key Infrastructure
+
+- **BullMQ**: Orchestrates asynchronous evaluation pipelines.
+- **Token Bucket Rate Limiting**: Distributed rate limiting using Redis Lua scripts.
+- **pgvector**: Stores and queries high-dimensional embeddings for drift analysis.
+- **Pino**: Structured JSON logging for production observability.
+
+For detailed backend implementation details, see [backend/README.md](backend/README.md).

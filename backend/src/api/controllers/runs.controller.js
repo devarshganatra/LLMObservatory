@@ -1,25 +1,32 @@
 import * as runService from '../../services/runService.js';
-import { executePipeline } from '../../../runPipeline.js';
+import { enqueueRunJob } from '../../infrastructure/queue/runQueue.js';
 import { toRunDetailDTO } from '../dto/runDetail.dto.js';
 import { NotFoundError } from '../../errors/AppError.js';
 
 /**
  * POST /api/runs
- * Triggers a new run.
+ * Triggers a new run asynchronously.
+ *
+ * Returns 202 Accepted immediately with { run_id, status: "pending" }.
+ * The pipeline is processed by the BullMQ worker in a separate process.
  */
 export async function triggerRun(req, res, next) {
     try {
-        const { run_type, temperature } = req.body;
+        const { run_type = 'manual-api' } = req.body;
+        const userId = req.user.id;
 
-        // Validation handled by middleware
+        // 1. Create a lightweight 'pending' run record in PostgreSQL
+        const { dbRunId } = await runService.initPendingRun(userId, run_type);
 
-        const result = await executePipeline({
-            runType: run_type,
-            temperatureOverride: temperature,
-            userId: req.user.id
+        // 2. Enqueue job for the worker to pick up (non-blocking)
+        await enqueueRunJob(dbRunId);
+
+        // 3. Return immediately — client polls GET /api/runs/:id for status
+        res.status(202).json({
+            run_id: dbRunId,
+            status: 'pending',
+            message: 'Run queued for processing. Poll GET /api/runs/:id for status updates.'
         });
-
-        res.status(202).json(result);
     } catch (err) {
         next(err);
     }

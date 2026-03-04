@@ -11,6 +11,83 @@ import { logger } from '../logger/logger.js';
 import { redisCache } from '../infrastructure/redis/redisCache.js';
 import { redisKeys } from '../infrastructure/redis/redisKeys.js';
 
+// Pipeline orchestrator (used by executeRunPipeline)
+import { executePipeline } from '../../runPipeline.js';
+
+/**
+ * Creates a lightweight 'pending' run record for async pipeline execution.
+ * The worker's executeRunPipeline() completes the actual processing.
+ *
+ * Status flow: pending → processing → completed | failed
+ *
+ * @param {string} userId - Authenticated user ID
+ * @param {string} runType - 'manual-api' | 'scheduled', etc.
+ * @returns {Promise<{ dbRunId: string }>}
+ */
+export async function initPendingRun(userId, runType = 'manual-api') {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        // We use a placeholder model — the real model is determined during pipeline
+        // We insert with a known 'probe_only' sentinel to create the DB row
+        const dbRunId = await client.query(
+            `INSERT INTO runs (model_id, probe_version, status, user_id, metadata)
+             SELECT id, 'pending', 'pending', $1, $2
+             FROM models
+             ORDER BY created_at DESC
+             LIMIT 1
+             RETURNING id`,
+            [userId || null, JSON.stringify({ run_type: runType, source: 'api' })]
+        ).then(r => r.rows[0]?.id);
+
+        await client.query('COMMIT');
+        logger.info({ dbRunId, userId, runType }, 'Pending run record created');
+        return { dbRunId };
+    } catch (err) {
+        await client.query('ROLLBACK');
+        throw new DatabaseError(`Failed to create pending run: ${err.message}`);
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Executes the full run pipeline for an existing pending run.
+ * Called exclusively by the BullMQ worker — NOT by the controller.
+ *
+ * Enforces status transition: pending → processing → completed | failed
+ *
+ * @param {string} dbRunId - Existing run UUID in 'pending' state
+ */
+export async function executeRunPipeline(dbRunId) {
+    const pipelineStart = Date.now();
+
+    // Transition: pending → processing (fail fast if already processing)
+    await updateRunStatus(dbRunId, { status: 'processing' });
+    logger.info({ run_id: dbRunId }, 'Run status: pending → processing');
+
+    try {
+        // Delegate to existing pipeline orchestrator in runPipeline.js
+        // It handles all DB writes, feature extraction, drift, and insights
+        await executePipeline({ userId: null, _existingRunId: dbRunId });
+
+        // Invalidate caches that may serve stale data
+        await redisCache.invalidateRun(dbRunId);
+
+        const durationMs = Date.now() - pipelineStart;
+        logger.info({ run_id: dbRunId, duration_ms: durationMs }, 'Pipeline execution completed');
+    } catch (err) {
+        logger.error({ err, run_id: dbRunId }, 'Pipeline execution failed');
+        await updateRunStatus(dbRunId, {
+            status: 'failed',
+            lastError: err.message,
+            metadata: { stack: err.stack }
+        }).catch(e => logger.error({ err: e }, 'Could not update failed status'));
+        throw err; // Rethrow so BullMQ retry logic triggers
+    }
+}
+
 /**
  * Computes a deterministic config hash for model deduplication.
  */

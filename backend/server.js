@@ -1,5 +1,6 @@
 import 'dotenv-flow/config';
 import express from 'express';
+import cors from 'cors';
 import pinoHttp from 'pino-http';
 import { logger } from './src/logger/logger.js';
 import { requestId } from './src/api/middleware/requestId.js';
@@ -7,16 +8,20 @@ import { errorHandler } from './src/errors/errorHandler.js';
 import pool from './src/db/connection.js';
 import * as qdrantService from './src/embeddings/qdrantService.js';
 
-// Routes
-import authRoutes from './src/api/routes/auth.routes.js';
-import runsRoutes from './src/api/routes/runs.routes.js';
-import driftRoutes from './src/api/routes/drift.routes.js';
-import insightsRoutes from './src/api/routes/insights.routes.js';
-import baselinesRoutes from './src/api/routes/baselines.routes.js';
 import { protect, requireRole } from './src/api/middleware/auth.middleware.js';
+import redisClient from './src/infrastructure/redis/redisClient.js';
+import systemRoutes from './src/api/routes/system.routes.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// CORS — allow frontend origin
+app.use(cors({
+    origin: process.env.CORS_ORIGIN || 'http://localhost:5173',
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+}));
 
 // Middleware
 app.use(requestId);
@@ -29,6 +34,7 @@ app.use(pinoHttp({
 app.use(express.json());
 
 // Routes Mounting
+app.use('/api/system', systemRoutes);
 app.use('/api/auth', authRoutes);
 
 // Protected Routes
@@ -56,9 +62,23 @@ app.use((req, res) => {
 app.use(errorHandler);
 
 // Startup
-const server = app.listen(PORT, () => {
-    logger.info({ port: PORT, env: process.env.NODE_ENV }, '🚀 LLM Observatory API Server started');
-});
+const start = async () => {
+    try {
+        // Connect to Redis (Lazy Connect)
+        await redisClient.connect();
+
+        const server = app.listen(PORT, () => {
+            logger.info({ port: PORT, env: process.env.NODE_ENV }, '🚀 LLM Observatory API Server started');
+        });
+
+        return server;
+    } catch (err) {
+        logger.error({ err }, 'Failed to start server');
+        process.exit(1);
+    }
+};
+
+const server = await start();
 
 /**
  * Graceful Shutdown Handling
@@ -73,17 +93,22 @@ const shutdown = async (signal) => {
     }, 10000);
 
     try {
-        // Stop server from accepting new requests
+        // 1. Stop server from accepting new requests
         server.close(() => {
             logger.info('HTTP server closed');
         });
 
-        // Close DB connections
+        // 2. Close Redis connection
+        await redisClient.quit();
+        logger.info('Redis connection closed');
+
+        // 3. Close DB connections
         await pool.end();
         logger.info('PostgreSQL pool closed');
 
-        // Close Qdrant client
+        // 4. Close Qdrant client
         await qdrantService.closeClient();
+        logger.info('Qdrant client closed');
 
         clearTimeout(forceQuit);
         logger.info('Shutdown complete');

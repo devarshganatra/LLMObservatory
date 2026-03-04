@@ -8,6 +8,8 @@ import { toRunSummaryDTO } from '../api/dto/runSummary.dto.js';
 import { getLatestDriftRunByRunId } from '../repositories/driftRepository.js';
 import { DatabaseError, NotFoundError } from '../errors/AppError.js';
 import { logger } from '../logger/logger.js';
+import { redisCache } from '../infrastructure/redis/redisCache.js';
+import { redisKeys } from '../infrastructure/redis/redisKeys.js';
 
 /**
  * Computes a deterministic config hash for model deduplication.
@@ -66,6 +68,9 @@ export async function persistRun(runData, userId) {
         await client.query('COMMIT');
         logger.info({ dbRunId, original_id: runData.run_id }, 'Run persisted to DB');
 
+        // Invalidate cache on new run
+        await redisCache.invalidateRun(dbRunId);
+
         return { dbRunId, runId: runData.run_id };
 
     } catch (err) {
@@ -81,13 +86,19 @@ export async function persistRun(runData, userId) {
  * Fetches paginated runs with summary DTOs.
  */
 export async function getRuns(filters) {
+    const cacheKey = redisKeys.cache.runsPage(filters.page || 1);
+
+    // Attempt cache hit
+    const cachedData = await redisCache.get(cacheKey);
+    if (cachedData) return cachedData;
+
     try {
         const [rows, total] = await Promise.all([
             getPaginatedRuns(filters),
             countRuns(filters)
         ]);
 
-        return {
+        const result = {
             data: rows.map(toRunSummaryDTO),
             meta: {
                 total,
@@ -95,6 +106,11 @@ export async function getRuns(filters) {
                 limit: filters.limit
             }
         };
+
+        // Cache result for 30 seconds
+        await redisCache.set(cacheKey, result, 30);
+
+        return result;
     } catch (err) {
         throw new DatabaseError(`Failed to fetch runs: ${err.message}`);
     }
@@ -104,6 +120,12 @@ export async function getRuns(filters) {
  * Fetches a single run detail with aggregated drift/insight summary markers.
  */
 export async function getRunById(runId, userId) {
+    const cacheKey = redisKeys.cache.run(runId);
+
+    // Attempt cache hit
+    const cachedData = await redisCache.get(cacheKey);
+    if (cachedData) return cachedData;
+
     try {
         const run = await getRunDetailsById(runId, userId);
         if (!run) return null;
@@ -116,7 +138,12 @@ export async function getRunById(runId, userId) {
         );
         const insight = insightResult.rows[0];
 
-        return { run, drift, insight };
+        const result = { run, drift, insight };
+
+        // Cache result for 30 seconds
+        await redisCache.set(cacheKey, result, 30);
+
+        return result;
     } catch (err) {
         if (err instanceof NotFoundError) throw err;
         throw new DatabaseError(`Failed to fetch run details: ${err.message}`);

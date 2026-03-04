@@ -1,40 +1,30 @@
 import express from 'express';
-import rateLimit from 'express-rate-limit';
 import * as authController from '../controllers/auth.controller.js';
 import { validate } from '../middleware/validate.js';
 import { protect } from '../middleware/auth.middleware.js';
 import { registerSchema, loginSchema, refreshSchema } from '../validations/auth.validation.js';
+import { rateLimiter } from '../middleware/rateLimiter.middleware.js';
 
 const router = express.Router();
 
 /**
- * Rate limit for authentication endpoints.
- * 5 attempts per 15 minutes for login/register.
+ * Rate limit for authentication endpoints (Distributed).
+ * 5 attempts per minute for login/register.
  */
-const authLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 10, // Slightly more generous for dev
-    message: {
-        status: 'fail',
-        message: 'Too many requests from this IP, please try again after 15 minutes'
-    },
-    standardHeaders: true,
-    legacyHeaders: false,
+const authLimiter = rateLimiter({
+    limit: 5,
+    window: 60,
+    keyType: 'ip'
 });
 
 /**
- * Stricter rate limit for refresh endpoint.
+ * Stricter rate limit for refresh endpoint (Distributed).
  * 10 requests per minute.
  */
-const refreshLimiter = rateLimit({
-    windowMs: 60 * 1000,
-    max: 10,
-    message: {
-        status: 'fail',
-        message: 'Too many refresh attempts, please try again after a minute'
-    },
-    standardHeaders: true,
-    legacyHeaders: false,
+const refreshLimiter = rateLimiter({
+    limit: 10,
+    window: 60,
+    keyType: 'user'
 });
 
 router.post('/register', authLimiter, validate(registerSchema), authController.register);
